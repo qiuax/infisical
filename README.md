@@ -1,1 +1,1 @@
-# infisical-go
+# infisical
