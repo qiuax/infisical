@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"regexp"
 	"sync"
 	"time"
 
@@ -15,8 +16,8 @@ import (
 
 // subscription represents a secret subscription
 type subscription struct {
-	paths   map[string]bool // paths that this subscription is interested in
-	channel chan models.Secret
+	patterns []*regexp.Regexp // regex patterns for path matching
+	channel  chan models.Secret
 }
 
 // Client represents the main structure of the Infisical client
@@ -92,12 +93,18 @@ func (c *Client) NotifyUpdateOn(paths ...string) chan models.Secret {
 	ch := make(chan models.Secret, 100) // Buffer size of 100
 
 	sub := &subscription{
-		paths:   make(map[string]bool),
-		channel: ch,
+		patterns: make([]*regexp.Regexp, 0, len(paths)),
+		channel:  ch,
 	}
 
 	for _, p := range paths {
-		sub.paths[p] = true
+		// Compile the pattern, if compilation fails, treat it as a literal path
+		pattern, err := regexp.Compile(p)
+		if err != nil {
+			// If not a valid regex, escape special characters and compile as literal
+			pattern = regexp.MustCompile(regexp.QuoteMeta(p))
+		}
+		sub.patterns = append(sub.patterns, pattern)
 	}
 
 	c.subMu.Lock()
@@ -265,8 +272,16 @@ func (c *Client) notifySubscribers(secret *models.Secret, action string) {
 	defer c.subMu.RUnlock()
 
 	for _, sub := range c.subscriptions {
-		// Check if this subscriber is interested in this secret
-		if sub.paths[secret.Path] || sub.paths[path.Dir(secret.Path)] {
+		// Check if any pattern matches the secret path
+		matched := false
+		for _, pattern := range sub.patterns {
+			if pattern.MatchString(secret.Path) {
+				matched = true
+				break
+			}
+		}
+
+		if matched {
 			// Non-blocking send
 			select {
 			case sub.channel <- *secret:
