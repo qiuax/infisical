@@ -11,9 +11,12 @@ import (
 func main() {
 	// Create configuration
 	cfg := config.Config{
-		SiteURL:         "http://127.0.0.1:8888",
-		ClientId:        "e90ac9a4-c6f3-4ec0-bf42-912ad9483693",
-		ClientSecret:    "1cbea4e19812b9415be22a15bdbea33f7848b60c6241648dda66e95d4f93ba63",
+		SiteURL:      "http://127.0.0.1:8888",
+		ClientId:     "e90ac9a4-c6f3-4ec0-bf42-912ad9483693", // test_identity
+		ClientSecret: "1cbea4e19812b9415be22a15bdbea33f7848b60c6241648dda66e95d4f93ba63",
+		//
+		//ClientId:        "faa74ccc-090f-4a47-b428-3b86b8030a92",
+		//ClientSecret:    "c83a73cee47a98b12a5589d46104181ce34ad8c1687db23b7ec97d0215796398",
 		ProjectId:       "6d7bdea8-1073-46a5-9e81-cd7ad4c71d71",
 		Environment:     "dev",
 		SecretPath:      "/",
@@ -49,6 +52,20 @@ func main() {
 		}
 	}()
 
+	// create or update
+	err = client.SetSecret("/", "API_KEY", "secret123")
+	if err != nil {
+		log.Printf("Failed to SetSecret: %v", err)
+	} else {
+		log.Println("SetSecret success")
+	}
+	//// delete
+	err = client.DeleteSecret("/", "API_KEY")
+	if err != nil {
+		log.Printf("Failed to DeleteSecret : %v", err)
+	} else {
+		log.Println("DeleteSecret success")
+	}
 	// Keep the program running to observe secret changes
 	select {}
 }

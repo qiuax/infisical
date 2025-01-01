@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"log"
 	"path"
 	"regexp"
 	"sync"
@@ -192,41 +193,76 @@ func (c *Client) refreshSecrets() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Create new secrets map
+	// Create new secrets map for subscribed secrets only
 	newSecrets := make(map[string]*models.Secret)
 
 	// Process all secrets
 	for _, s := range secrets {
-		secretPath := models.ParseSecretPath(s.SecretPath)
-		fullPath := secretPath.FullPath()
-		fullPath = path.Join(fullPath, s.SecretKey)
-		newSecret := &models.Secret{
-			Key:       s.SecretKey,
-			Value:     s.SecretValue,
-			Type:      s.Type,
-			Path:      s.SecretPath,
-			UpdatedAt: time.Now(),
+		// Check if any subscriber is interested in this secret
+		isSubscribed := false
+		c.subMu.RLock()
+		for _, sub := range c.subscriptions {
+			for _, pattern := range sub.patterns {
+				if pattern.MatchString(s.SecretPath) {
+					isSubscribed = true
+					break
+				}
+			}
+			if isSubscribed {
+				break
+			}
 		}
+		c.subMu.RUnlock()
 
-		// Check for changes
-		oldSecret, exists := c.secrets[fullPath]
-		if exists && oldSecret.Value != newSecret.Value {
-			c.notifySubscribers(newSecret, models.SecretActionUpdated)
-		} else if !exists {
-			c.notifySubscribers(newSecret, models.SecretActionCreated)
+		// Only process and cache if there are subscribers interested in this secret
+		if isSubscribed {
+			secretPath := models.ParseSecretPath(s.SecretPath)
+			fullPath := path.Join(secretPath.FullPath(), s.SecretKey)
+			newSecret := &models.Secret{
+				Key:       s.SecretKey,
+				Value:     s.SecretValue,
+				Type:      s.Type,
+				Path:      s.SecretPath,
+				UpdatedAt: time.Now(),
+			}
+
+			// Check for changes in subscribed secrets
+			oldSecret, exists := c.secrets[fullPath]
+			if exists && oldSecret.Value != newSecret.Value {
+				c.notifySubscribers(newSecret, models.SecretActionUpdated)
+			} else if !exists {
+				c.notifySubscribers(newSecret, models.SecretActionCreated)
+			}
+			newSecrets[fullPath] = newSecret
 		}
-
-		newSecrets[fullPath] = newSecret
 	}
 
-	// Check for deleted secrets
+	// Check for deleted secrets among subscribed ones
 	for fullPath, oldSecret := range c.secrets {
 		if _, exists := newSecrets[fullPath]; !exists {
-			c.notifySubscribers(oldSecret, models.SecretActionDeleted)
+			// Verify if the path is still subscribed
+			isSubscribed := false
+			c.subMu.RLock()
+			for _, sub := range c.subscriptions {
+				for _, pattern := range sub.patterns {
+					if pattern.MatchString(oldSecret.Path) {
+						isSubscribed = true
+						break
+					}
+				}
+				if isSubscribed {
+					break
+				}
+			}
+			c.subMu.RUnlock()
+
+			if isSubscribed {
+				c.notifySubscribers(oldSecret, models.SecretActionDeleted)
+			}
 		}
 	}
 
-	// Update secrets store
+	// Only update with secrets that have subscribers
 	c.secrets = newSecrets
 	return nil
 }
@@ -291,4 +327,79 @@ func (c *Client) notifySubscribers(secret *models.Secret, action string) {
 		}
 	}
 
+}
+
+// SetSecret creates or updates a secret in Infisical
+func (c *Client) SetSecret(secretPath string, key string, value string) error {
+	// Wait for initialization to complete
+	select {
+	case <-c.initialized:
+	case <-c.ctx.Done():
+		return errors.NewError(errors.ErrCodeNetworkError, "client closed", nil)
+	}
+
+	// First try to retrieve the secret to check if it exists
+	_, err := c.client.Secrets().Retrieve(infisical.RetrieveSecretOptions{
+		SecretKey:   key,
+		Environment: c.config.Environment,
+		ProjectID:   c.config.ProjectId,
+		SecretPath:  secretPath,
+	})
+
+	if err != nil {
+		// Secret doesn't exist, create a new one
+		_, err = c.client.Secrets().Create(infisical.CreateSecretOptions{
+			ProjectID:   c.config.ProjectId,
+			Environment: c.config.Environment,
+			SecretKey:   key,
+			SecretValue: value,
+
+			SecretPath: secretPath,
+		})
+	} else {
+		// Secret exists, update it
+		_, err = c.client.Secrets().Update(infisical.UpdateSecretOptions{
+			SecretKey:      key,
+			NewSecretValue: value,
+			Environment:    c.config.Environment,
+			ProjectID:      c.config.ProjectId,
+			SecretPath:     secretPath,
+		})
+	}
+
+	if err != nil {
+		return errors.NewError(errors.ErrCodeSecretUpdateFailed, fmt.Sprintf("failed to set secret: %s", key), err)
+	}
+
+	// Trigger a refresh to update subscribers if any
+	go c.refreshSecrets()
+
+	return nil
+}
+
+// DeleteSecret deletes a secret from Infisical
+func (c *Client) DeleteSecret(secretPath string, key string) error {
+	// Wait for initialization to complete
+	select {
+	case <-c.initialized:
+	case <-c.ctx.Done():
+		return errors.NewError(errors.ErrCodeNetworkError, "client closed", nil)
+	}
+
+	// Delete secret directly from Infisical
+	mc, err := c.client.Secrets().Delete(infisical.DeleteSecretOptions{
+		SecretKey:   key,
+		Environment: c.config.Environment,
+		ProjectID:   c.config.ProjectId,
+		SecretPath:  secretPath,
+	})
+	log.Printf("------>%+v", mc)
+	if err != nil {
+		return errors.NewError(errors.ErrCodeSecretUpdateFailed, fmt.Sprintf("failed to delete secret: %s", key), err)
+	}
+
+	// Trigger a refresh to update subscribers if any
+	go c.refreshSecrets()
+
+	return nil
 }
