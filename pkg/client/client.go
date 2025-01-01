@@ -123,7 +123,7 @@ func (c *Client) Unsubscribe(ch chan models.Secret) {
 	}
 }
 
-// GetSecret retrieves a specific secret by path and key
+// GetSecret retrieves a specific secret by path and key directly from Infisical server
 func (c *Client) GetSecret(secretPath string, key string) (*models.Secret, error) {
 	// Wait for initialization to complete
 	select {
@@ -132,17 +132,26 @@ func (c *Client) GetSecret(secretPath string, key string) (*models.Secret, error
 		return nil, errors.NewError(errors.ErrCodeNetworkError, "client closed", nil)
 	}
 
-	fullPath := path.Join(secretPath, key)
+	// Directly fetch from Infisical server
+	secret, err := c.client.Secrets().Retrieve(infisical.RetrieveSecretOptions{
+		SecretKey:   key,
+		Environment: c.config.Environment,
+		ProjectID:   c.config.ProjectId,
+		SecretPath:  secretPath,
+	})
 
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	secret, ok := c.secrets[fullPath]
-	if !ok {
-		return nil, errors.NewError(errors.ErrCodeSecretNotFound, fmt.Sprintf("secret not found: %s", fullPath), nil)
+	if err != nil {
+		return nil, errors.NewError(errors.ErrCodeSecretNotFound, fmt.Sprintf("failed to retrieve secret: %s", key), err)
 	}
 
-	return secret, nil
+	// Convert to internal Secret model
+	return &models.Secret{
+		Key:       secret.SecretKey,
+		Value:     secret.SecretValue,
+		Type:      secret.Type,
+		Path:      secret.SecretPath,
+		UpdatedAt: time.Now(),
+	}, nil
 }
 
 // Close shuts down the client
