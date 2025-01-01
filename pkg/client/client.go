@@ -180,29 +180,52 @@ func (c *Client) Close() {
 
 // refreshSecrets fetches and updates secrets from the server
 func (c *Client) refreshSecrets() error {
-	// Get all subscribed paths
+	// Get all subscribed paths and build a pattern map
 	c.subMu.RLock()
 	paths := make(map[string]bool)
+	// Create a map to store all patterns and their associated channels
+	patternMap := make(map[*regexp.Regexp][]chan models.Secret)
 	for _, sub := range c.subscriptions {
 		for _, pattern := range sub.patterns {
 			// For regex patterns that match root or subdirectories
 			if pattern.String() == ".*" || pattern.String() == "/.+" {
 				paths["/"] = true
-				continue
-			}
-			// Extract the actual path from the pattern
-			patternStr := pattern.String()
-			if path.Dir(patternStr) != "." {
-				paths[path.Dir(patternStr)] = true
 			} else {
-				paths[patternStr] = true
+				// Extract the actual path from the pattern
+				patternStr := pattern.String()
+				if path.Dir(patternStr) != "." {
+					paths[path.Dir(patternStr)] = true
+				} else {
+					paths[patternStr] = true
+				}
 			}
+			// Store the pattern and its channel
+			patternMap[pattern] = append(patternMap[pattern], sub.channel)
 		}
 	}
 	c.subMu.RUnlock()
 
 	// Create new secrets map for subscribed secrets only
 	newSecrets := make(map[string]*models.Secret)
+
+	// Helper function to check if a secret matches any pattern and notify subscribers
+	matchAndNotify := func(secret *models.Secret, action string) bool {
+		matched := false
+		for pattern, channels := range patternMap {
+			if pattern.MatchString(secret.Path) {
+				matched = true
+				// Notify all channels interested in this pattern
+				for _, ch := range channels {
+					select {
+					case ch <- *secret:
+					default:
+						// Channel is full, skip this update
+					}
+				}
+			}
+		}
+		return matched
+	}
 
 	// Fetch secrets for each path
 	for secretPath := range paths {
@@ -218,73 +241,41 @@ func (c *Client) refreshSecrets() error {
 
 		// Process secrets for this path
 		for _, s := range secrets {
-			// Check if any subscriber is interested in this secret
-			isSubscribed := false
-			c.subMu.RLock()
-			for _, sub := range c.subscriptions {
-				for _, pattern := range sub.patterns {
-					if pattern.MatchString(s.SecretPath) {
-						isSubscribed = true
-						break
-					}
-				}
-				if isSubscribed {
-					break
-				}
+			secretPath := models.ParseSecretPath(s.SecretPath)
+			fullPath := path.Join(secretPath.FullPath(), s.SecretKey)
+			newSecret := &models.Secret{
+				Key:       s.SecretKey,
+				Value:     s.SecretValue,
+				Type:      s.Type,
+				Path:      s.SecretPath,
+				UpdatedAt: time.Now(),
 			}
-			c.subMu.RUnlock()
 
-			// Only process and cache if there are subscribers interested in this secret
-			if isSubscribed {
-				secretPath := models.ParseSecretPath(s.SecretPath)
-				fullPath := path.Join(secretPath.FullPath(), s.SecretKey)
-				newSecret := &models.Secret{
-					Key:       s.SecretKey,
-					Value:     s.SecretValue,
-					Type:      s.Type,
-					Path:      s.SecretPath,
-					UpdatedAt: time.Now(),
-				}
-
+			// Check if any subscriber is interested and notify them
+			if matchAndNotify(newSecret, models.SecretActionCreated) {
 				// Check for changes in subscribed secrets
 				oldSecret, exists := c.secrets[fullPath]
 				if exists && oldSecret.Value != newSecret.Value {
-					c.notifySubscribers(newSecret, models.SecretActionUpdated)
-				} else if !exists {
-					c.notifySubscribers(newSecret, models.SecretActionCreated)
+					matchAndNotify(newSecret, models.SecretActionUpdated)
 				}
 				newSecrets[fullPath] = newSecret
 			}
 		}
 	}
 
-	// Check for deleted secrets among subscribed ones
+	// Check for deleted secrets
 	for fullPath, oldSecret := range c.secrets {
 		if _, exists := newSecrets[fullPath]; !exists {
-			// Verify if the path is still subscribed
-			isSubscribed := false
-			c.subMu.RLock()
-			for _, sub := range c.subscriptions {
-				for _, pattern := range sub.patterns {
-					if pattern.MatchString(oldSecret.Path) {
-						isSubscribed = true
-						break
-					}
-				}
-				if isSubscribed {
-					break
-				}
-			}
-			c.subMu.RUnlock()
-
-			if isSubscribed {
-				c.notifySubscribers(oldSecret, models.SecretActionDeleted)
-			}
+			// Only notify if the secret was subscribed
+			matchAndNotify(oldSecret, models.SecretActionDeleted)
 		}
 	}
 
-	// Only update with secrets that have subscribers
+	// Update secrets store with only subscribed secrets
+	c.mu.Lock()
 	c.secrets = newSecrets
+	c.mu.Unlock()
+
 	return nil
 }
 

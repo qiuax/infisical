@@ -67,5 +67,14 @@ func main() {
 		log.Println("DeleteSecret success")
 	}
 	// Keep the program running to observe secret changes
+
+	// Subscribe to a specific catalog
+	//client.NotifyUpdateOn("/api/v1")
+	//
+	//// Subscribe to all catalogs
+	//client.NotifyUpdateOn(".*")
+	//
+	//// Subscribe to multiple directories
+	//client.NotifyUpdateOn("/api/.*", "/db/.*")
 	select {}
 }
