@@ -180,60 +180,81 @@ func (c *Client) Close() {
 
 // refreshSecrets fetches and updates secrets from the server
 func (c *Client) refreshSecrets() error {
-	secrets, err := c.client.Secrets().List(infisical.ListSecretsOptions{
-		Environment: c.config.Environment,
-		ProjectID:   c.config.ProjectId,
-		SecretPath:  c.config.SecretPath,
-	})
-
-	if err != nil {
-		return errors.NewError(errors.ErrCodeNetworkError, "failed to refresh secrets", err)
+	// Get all subscribed paths
+	c.subMu.RLock()
+	paths := make(map[string]bool)
+	for _, sub := range c.subscriptions {
+		for _, pattern := range sub.patterns {
+			// For regex patterns that match root or subdirectories
+			if pattern.String() == ".*" || pattern.String() == "/.+" {
+				paths["/"] = true
+				continue
+			}
+			// Extract the actual path from the pattern
+			patternStr := pattern.String()
+			if path.Dir(patternStr) != "." {
+				paths[path.Dir(patternStr)] = true
+			} else {
+				paths[patternStr] = true
+			}
+		}
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.subMu.RUnlock()
 
 	// Create new secrets map for subscribed secrets only
 	newSecrets := make(map[string]*models.Secret)
 
-	// Process all secrets
-	for _, s := range secrets {
-		// Check if any subscriber is interested in this secret
-		isSubscribed := false
-		c.subMu.RLock()
-		for _, sub := range c.subscriptions {
-			for _, pattern := range sub.patterns {
-				if pattern.MatchString(s.SecretPath) {
-					isSubscribed = true
+	// Fetch secrets for each path
+	for secretPath := range paths {
+		secrets, err := c.client.Secrets().List(infisical.ListSecretsOptions{
+			Environment: c.config.Environment,
+			ProjectID:   c.config.ProjectId,
+			SecretPath:  secretPath,
+		})
+
+		if err != nil {
+			return errors.NewError(errors.ErrCodeNetworkError, fmt.Sprintf("failed to refresh secrets for path %s", secretPath), err)
+		}
+
+		// Process secrets for this path
+		for _, s := range secrets {
+			// Check if any subscriber is interested in this secret
+			isSubscribed := false
+			c.subMu.RLock()
+			for _, sub := range c.subscriptions {
+				for _, pattern := range sub.patterns {
+					if pattern.MatchString(s.SecretPath) {
+						isSubscribed = true
+						break
+					}
+				}
+				if isSubscribed {
 					break
 				}
 			}
+			c.subMu.RUnlock()
+
+			// Only process and cache if there are subscribers interested in this secret
 			if isSubscribed {
-				break
-			}
-		}
-		c.subMu.RUnlock()
+				secretPath := models.ParseSecretPath(s.SecretPath)
+				fullPath := path.Join(secretPath.FullPath(), s.SecretKey)
+				newSecret := &models.Secret{
+					Key:       s.SecretKey,
+					Value:     s.SecretValue,
+					Type:      s.Type,
+					Path:      s.SecretPath,
+					UpdatedAt: time.Now(),
+				}
 
-		// Only process and cache if there are subscribers interested in this secret
-		if isSubscribed {
-			secretPath := models.ParseSecretPath(s.SecretPath)
-			fullPath := path.Join(secretPath.FullPath(), s.SecretKey)
-			newSecret := &models.Secret{
-				Key:       s.SecretKey,
-				Value:     s.SecretValue,
-				Type:      s.Type,
-				Path:      s.SecretPath,
-				UpdatedAt: time.Now(),
+				// Check for changes in subscribed secrets
+				oldSecret, exists := c.secrets[fullPath]
+				if exists && oldSecret.Value != newSecret.Value {
+					c.notifySubscribers(newSecret, models.SecretActionUpdated)
+				} else if !exists {
+					c.notifySubscribers(newSecret, models.SecretActionCreated)
+				}
+				newSecrets[fullPath] = newSecret
 			}
-
-			// Check for changes in subscribed secrets
-			oldSecret, exists := c.secrets[fullPath]
-			if exists && oldSecret.Value != newSecret.Value {
-				c.notifySubscribers(newSecret, models.SecretActionUpdated)
-			} else if !exists {
-				c.notifySubscribers(newSecret, models.SecretActionCreated)
-			}
-			newSecrets[fullPath] = newSecret
 		}
 	}
 
