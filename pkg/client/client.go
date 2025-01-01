@@ -290,5 +290,5 @@ func (c *Client) notifySubscribers(secret *models.Secret, action string) {
 			}
 		}
 	}
-	//
+
 }
