@@ -4,14 +4,14 @@ import (
 	"log"
 	"time"
 
-	"infisical/pkg/client"
-	"infisical/pkg/config"
+	"github.com/hashmatoteam/infisical/pkg/client"
+	"github.com/hashmatoteam/infisical/pkg/config"
 )
 
 func main() {
 	// Create configuration
 	cfg := config.Config{
-		SiteURL:      "http://127.0.0.1:8888",
+		SiteURL:      "http://8.222.152.126:8888",
 		ClientId:     "e90ac9a4-c6f3-4ec0-bf42-912ad9483693", // test_identity
 		ClientSecret: "1cbea4e19812b9415be22a15bdbea33f7848b60c6241648dda66e95d4f93ba63",
 		//

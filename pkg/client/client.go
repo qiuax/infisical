@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashmatoteam/infisical/pkg/config"
+	"github.com/hashmatoteam/infisical/pkg/errors"
+	"github.com/hashmatoteam/infisical/pkg/models"
 	infisical "github.com/infisical/go-sdk"
-	"infisical/pkg/config"
-	"infisical/pkg/errors"
-	"infisical/pkg/models"
 )
 
 // subscription represents a secret subscription

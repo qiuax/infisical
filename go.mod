@@ -1,4 +1,4 @@
-module infisical
+module github.com/hashmatoteam/infisical
 
 go 1.22.0
 
