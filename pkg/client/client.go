@@ -6,6 +6,7 @@ import (
 	"log"
 	"path"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,7 +19,7 @@ import (
 // subscription represents a secret subscription
 type subscription struct {
 	patterns []*regexp.Regexp // regex patterns for path matching
-	channel  chan models.Secret
+	channel  chan models.SecretEvent
 }
 
 // Client represents the main structure of the Infisical client
@@ -83,7 +84,7 @@ func NewClient(cfg config.Config) (*Client, error) {
 }
 
 // NotifyUpdateOn subscribes to updates for specific secret paths
-func (c *Client) NotifyUpdateOn(paths ...string) chan models.Secret {
+func (c *Client) NotifyUpdateOn(paths ...string) chan models.SecretEvent {
 	// Wait for initialization to complete
 	select {
 	case <-c.initialized:
@@ -91,7 +92,7 @@ func (c *Client) NotifyUpdateOn(paths ...string) chan models.Secret {
 		return nil
 	}
 
-	ch := make(chan models.Secret, 100) // Buffer size of 100
+	ch := make(chan models.SecretEvent, 100) // Buffer size of 100
 
 	sub := &subscription{
 		patterns: make([]*regexp.Regexp, 0, len(paths)),
@@ -99,13 +100,21 @@ func (c *Client) NotifyUpdateOn(paths ...string) chan models.Secret {
 	}
 
 	for _, p := range paths {
-		// Compile the pattern, if compilation fails, treat it as a literal path
-		pattern, err := regexp.Compile(p)
-		if err != nil {
-			// If not a valid regex, escape special characters and compile as literal
-			pattern = regexp.MustCompile(regexp.QuoteMeta(p))
+		// If path contains wildcards, ensure it's properly formatted for regex
+		pattern := p
+		if containsWildcard(p) {
+			// Escape all special characters except wildcards
+			pattern = escapeExceptWildcards(p)
+		} else {
+			pattern = regexp.QuoteMeta(p)
 		}
-		sub.patterns = append(sub.patterns, pattern)
+
+		compiledPattern, err := regexp.Compile(pattern)
+		if err != nil {
+			// If compilation fails, treat it as a literal path
+			compiledPattern = regexp.MustCompile(regexp.QuoteMeta(p))
+		}
+		sub.patterns = append(sub.patterns, compiledPattern)
 	}
 
 	c.subMu.Lock()
@@ -116,7 +125,7 @@ func (c *Client) NotifyUpdateOn(paths ...string) chan models.Secret {
 }
 
 // Unsubscribe removes a subscription
-func (c *Client) Unsubscribe(ch chan models.Secret) {
+func (c *Client) Unsubscribe(ch chan models.SecretEvent) {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 
@@ -183,49 +192,33 @@ func (c *Client) refreshSecrets() error {
 	// Get all subscribed paths and build a pattern map
 	c.subMu.RLock()
 	paths := make(map[string]bool)
-	// Create a map to store all patterns and their associated channels
-	patternMap := make(map[*regexp.Regexp][]chan models.Secret)
 	for _, sub := range c.subscriptions {
 		for _, pattern := range sub.patterns {
-			// For regex patterns that match root or subdirectories
-			if pattern.String() == ".*" || pattern.String() == "/.+" {
+			patternStr := pattern.String()
+			// Handle different wildcard cases
+			switch {
+			case patternStr == "/" || patternStr == ".*" || patternStr == "/.+":
+				// Match everything
 				paths["/"] = true
-			} else {
-				// Extract the actual path from the pattern
-				patternStr := pattern.String()
+			case containsWildcard(patternStr):
+				// For patterns with wildcards, we need to fetch from the root directory
+				// that contains the wildcard
+				rootPath := getRootPath(patternStr)
+				paths[rootPath] = true
+			default:
+				// For literal paths
 				if path.Dir(patternStr) != "." {
 					paths[path.Dir(patternStr)] = true
 				} else {
 					paths[patternStr] = true
 				}
 			}
-			// Store the pattern and its channel
-			patternMap[pattern] = append(patternMap[pattern], sub.channel)
 		}
 	}
 	c.subMu.RUnlock()
 
 	// Create new secrets map for subscribed secrets only
 	newSecrets := make(map[string]*models.Secret)
-
-	// Helper function to check if a secret matches any pattern and notify subscribers
-	matchAndNotify := func(secret *models.Secret, action string) bool {
-		matched := false
-		for pattern, channels := range patternMap {
-			if pattern.MatchString(secret.Path) {
-				matched = true
-				// Notify all channels interested in this pattern
-				for _, ch := range channels {
-					select {
-					case ch <- *secret:
-					default:
-						// Channel is full, skip this update
-					}
-				}
-			}
-		}
-		return matched
-	}
 
 	// Fetch secrets for each path
 	for secretPath := range paths {
@@ -251,12 +244,15 @@ func (c *Client) refreshSecrets() error {
 				UpdatedAt: time.Now(),
 			}
 
-			// Check if any subscriber is interested and notify them
-			if matchAndNotify(newSecret, models.SecretActionCreated) {
-				// Check for changes in subscribed secrets
+			// Check if any subscriber is interested in this secret
+			if channels := c.matchSecretWithPatterns(newSecret); len(channels) > 0 {
 				oldSecret, exists := c.secrets[fullPath]
-				if exists && oldSecret.Value != newSecret.Value {
-					matchAndNotify(newSecret, models.SecretActionUpdated)
+				if !exists {
+					// New secret
+					c.notifyChannels(newSecret, channels, models.SecretActionCreated)
+				} else if oldSecret.Value != newSecret.Value {
+					// Updated secret
+					c.notifyChannels(newSecret, channels, models.SecretActionUpdated)
 				}
 				newSecrets[fullPath] = newSecret
 			}
@@ -266,8 +262,9 @@ func (c *Client) refreshSecrets() error {
 	// Check for deleted secrets
 	for fullPath, oldSecret := range c.secrets {
 		if _, exists := newSecrets[fullPath]; !exists {
-			// Only notify if the secret was subscribed
-			matchAndNotify(oldSecret, models.SecretActionDeleted)
+			if channels := c.matchSecretWithPatterns(oldSecret); len(channels) > 0 {
+				c.notifyChannels(oldSecret, channels, models.SecretActionDeleted)
+			}
 		}
 	}
 
@@ -319,6 +316,11 @@ func (c *Client) notifySubscribers(secret *models.Secret, action string) {
 	c.subMu.RLock()
 	defer c.subMu.RUnlock()
 
+	event := models.SecretEvent{
+		Secret: secret,
+		Action: action,
+	}
+
 	for _, sub := range c.subscriptions {
 		// Check if any pattern matches the secret path
 		matched := false
@@ -332,13 +334,12 @@ func (c *Client) notifySubscribers(secret *models.Secret, action string) {
 		if matched {
 			// Non-blocking send
 			select {
-			case sub.channel <- *secret:
+			case sub.channel <- event:
 			default:
 				// Channel is full, skip this update for this subscriber
 			}
 		}
 	}
-
 }
 
 // SetSecret creates or updates a secret in Infisical
@@ -414,4 +415,81 @@ func (c *Client) DeleteSecret(secretPath string, key string) error {
 	go c.refreshSecrets()
 
 	return nil
+}
+
+// containsWildcard checks if a path contains any regex wildcard patterns
+func containsWildcard(path string) bool {
+	return strings.Contains(path, ".*") || strings.Contains(path, ".+") ||
+		strings.Contains(path, "[") || strings.Contains(path, "?")
+}
+
+// getRootPath returns the root path before the first wildcard in the pattern
+// For example: "/db/.*/tokens" returns "/db"
+func getRootPath(pattern string) string {
+	parts := strings.Split(pattern, "/")
+	var rootParts []string
+
+	for _, part := range parts {
+		if containsWildcard(part) {
+			break
+		}
+		if part != "" {
+			rootParts = append(rootParts, part)
+		}
+	}
+
+	if len(rootParts) == 0 {
+		return "/"
+	}
+	return "/" + strings.Join(rootParts, "/")
+}
+
+// escapeExceptWildcards escapes all regex special characters except wildcards
+func escapeExceptWildcards(pattern string) string {
+	// First, escape all special regex characters
+	escaped := regexp.QuoteMeta(pattern)
+
+	// Replace escaped wildcards with their original form
+	escaped = strings.ReplaceAll(escaped, `\.\*`, `.*`)
+	escaped = strings.ReplaceAll(escaped, `\.\+`, `.+`)
+
+	return escaped
+}
+
+// matchSecretWithPatterns checks if a secret matches any subscription patterns and returns the matching channels
+func (c *Client) matchSecretWithPatterns(secret *models.Secret) []chan models.SecretEvent {
+	c.subMu.RLock()
+	defer c.subMu.RUnlock()
+
+	var matchingChannels []chan models.SecretEvent
+	for _, sub := range c.subscriptions {
+		for _, pattern := range sub.patterns {
+			// For root path subscription ("/"), match everything
+			if pattern.String() == "/" && strings.HasPrefix(secret.Path, "/") {
+				matchingChannels = append(matchingChannels, sub.channel)
+				break
+			}
+			// For other patterns
+			if pattern.MatchString(secret.Path) {
+				matchingChannels = append(matchingChannels, sub.channel)
+				break // Once we find a match for this subscription, move to next one
+			}
+		}
+	}
+	return matchingChannels
+}
+
+// notifyChannels sends a secret event to all provided channels
+func (c *Client) notifyChannels(secret *models.Secret, channels []chan models.SecretEvent, action string) {
+	event := models.SecretEvent{
+		Secret: secret,
+		Action: action,
+	}
+	for _, ch := range channels {
+		select {
+		case ch <- event:
+		default:
+			// Channel is full, skip this update
+		}
+	}
 }

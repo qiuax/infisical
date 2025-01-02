@@ -48,7 +48,7 @@ func main() {
 	go func() {
 		for secret := range secretChan {
 			log.Printf("Secret updated: Path=%s, Key=%s, Value=%s",
-				secret.Path, secret.Key, secret.Value)
+				secret.Secret.Path, secret.Secret.Key, secret.Secret.Value)
 		}
 	}()
 
