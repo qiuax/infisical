@@ -60,13 +60,13 @@ func main() {
 	} else {
 		log.Println("SetSecret success")
 	}
-	//// delete
-	//err = client.DeleteSecret("/", "API_KEY")
-	//if err != nil {
-	//	log.Printf("Failed to DeleteSecret : %v", err)
-	//} else {
-	//	log.Println("DeleteSecret success")
-	//}
+	// delete
+	err = client.DeleteSecret("/test", "API_KEY")
+	if err != nil {
+		log.Printf("Failed to DeleteSecret : %v", err)
+	} else {
+		log.Println("DeleteSecret success")
+	}
 	// Keep the program running to observe secret changes
 
 	// Subscribe to a specific catalog
