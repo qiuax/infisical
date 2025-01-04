@@ -11,7 +11,7 @@ import (
 func main() {
 	// Create configuration
 	cfg := config.Config{
-		SiteURL:      "http://8.222.152.126:8888",
+		SiteURL:      "http://127.0.0.1:8888",
 		ClientId:     "e90ac9a4-c6f3-4ec0-bf42-912ad9483693", // test_identity
 		ClientSecret: "1cbea4e19812b9415be22a15bdbea33f7848b60c6241648dda66e95d4f93ba63",
 		//
@@ -32,8 +32,8 @@ func main() {
 	defer client.Close()
 
 	// Subscribe to secret updates
-	//secretChan := client.NotifyUpdateOn("/test/api", "/test/db")
-	secretChan := client.NotifyUpdateOn("/")
+	secretChan := client.NotifyUpdateOn("/", "/test")
+	//secretChan := client.NotifyUpdateOn("/")
 	defer client.Unsubscribe(secretChan)
 
 	// Get secret
@@ -53,19 +53,20 @@ func main() {
 	}()
 
 	// create or update
-	err = client.SetSecret("/", "API_KEY", "secret123")
+	//err = client.SetSecret("/", "API_KEY", "qwe123")
+	err = client.SetSecret("/test", "API_KEY", "qwe12345")
 	if err != nil {
 		log.Printf("Failed to SetSecret: %v", err)
 	} else {
 		log.Println("SetSecret success")
 	}
 	//// delete
-	err = client.DeleteSecret("/", "API_KEY")
-	if err != nil {
-		log.Printf("Failed to DeleteSecret : %v", err)
-	} else {
-		log.Println("DeleteSecret success")
-	}
+	//err = client.DeleteSecret("/", "API_KEY")
+	//if err != nil {
+	//	log.Printf("Failed to DeleteSecret : %v", err)
+	//} else {
+	//	log.Println("DeleteSecret success")
+	//}
 	// Keep the program running to observe secret changes
 
 	// Subscribe to a specific catalog

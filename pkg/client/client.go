@@ -206,9 +206,10 @@ func (c *Client) refreshSecrets() error {
 				rootPath := getRootPath(patternStr)
 				paths[rootPath] = true
 			default:
-				// For literal paths
+				// For literal paths, add both the path itself and its parent
 				if path.Dir(patternStr) != "." {
 					paths[path.Dir(patternStr)] = true
+					paths[patternStr] = true
 				} else {
 					paths[patternStr] = true
 				}
