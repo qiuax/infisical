@@ -342,6 +342,33 @@ func (c *Client) notifySubscribers(secret *models.Secret, action string) {
 	}
 }
 
+// createFolder creates a folder at the specified path if it doesn't exist
+func (c *Client) createFolder(folderPath string) error {
+	// Ensure path starts with "/"
+	if !strings.HasPrefix(folderPath, "/") {
+		folderPath = "/" + folderPath
+	}
+
+	// Get the folder name from the path
+	name := path.Base(folderPath)
+	parentPath := path.Dir(folderPath)
+	if parentPath == "/" {
+		parentPath = ""
+	}
+
+	// Create folder using Infisical API
+	_, err := c.client.Folders().Create(infisical.CreateFolderOptions{
+		ProjectID:   c.config.ProjectId,
+		Environment: c.config.Environment,
+		Name:        name,
+		Path:        parentPath,
+	})
+	if err != nil {
+		return errors.NewError(errors.ErrCodeSecretUpdateFailed, fmt.Sprintf("failed to create folder: %s", folderPath), err)
+	}
+	return nil
+}
+
 // SetSecret creates or updates a secret in Infisical
 func (c *Client) SetSecret(secretPath string, key string, value string) error {
 	// Wait for initialization to complete
@@ -351,7 +378,14 @@ func (c *Client) SetSecret(secretPath string, key string, value string) error {
 		return errors.NewError(errors.ErrCodeNetworkError, "client closed", nil)
 	}
 
-	// Try to create the secret first, as this will implicitly create the path if it doesn't exist
+	// First ensure the folder exists
+	if secretPath != "/" {
+		if err := c.createFolder(secretPath); err != nil {
+			return err
+		}
+	}
+
+	// Try to create the secret first
 	_, err := c.client.Secrets().Create(infisical.CreateSecretOptions{
 		ProjectID:   c.config.ProjectId,
 		Environment: c.config.Environment,
