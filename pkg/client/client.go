@@ -351,26 +351,17 @@ func (c *Client) SetSecret(secretPath string, key string, value string) error {
 		return errors.NewError(errors.ErrCodeNetworkError, "client closed", nil)
 	}
 
-	// First try to retrieve the secret to check if it exists
-	_, err := c.client.Secrets().Retrieve(infisical.RetrieveSecretOptions{
-		SecretKey:   key,
-		Environment: c.config.Environment,
+	// Try to create the secret first, as this will implicitly create the path if it doesn't exist
+	_, err := c.client.Secrets().Create(infisical.CreateSecretOptions{
 		ProjectID:   c.config.ProjectId,
+		Environment: c.config.Environment,
+		SecretKey:   key,
+		SecretValue: value,
 		SecretPath:  secretPath,
 	})
 
 	if err != nil {
-		// Secret doesn't exist, create a new one
-		_, err = c.client.Secrets().Create(infisical.CreateSecretOptions{
-			ProjectID:   c.config.ProjectId,
-			Environment: c.config.Environment,
-			SecretKey:   key,
-			SecretValue: value,
-
-			SecretPath: secretPath,
-		})
-	} else {
-		// Secret exists, update it
+		// If creation fails, try to update in case the secret already exists
 		_, err = c.client.Secrets().Update(infisical.UpdateSecretOptions{
 			SecretKey:      key,
 			NewSecretValue: value,
@@ -378,10 +369,10 @@ func (c *Client) SetSecret(secretPath string, key string, value string) error {
 			ProjectID:      c.config.ProjectId,
 			SecretPath:     secretPath,
 		})
-	}
 
-	if err != nil {
-		return errors.NewError(errors.ErrCodeSecretUpdateFailed, fmt.Sprintf("failed to set secret: %s", key), err)
+		if err != nil {
+			return errors.NewError(errors.ErrCodeSecretUpdateFailed, fmt.Sprintf("failed to set secret: %s", key), err)
+		}
 	}
 
 	// Trigger a refresh to update subscribers if any
