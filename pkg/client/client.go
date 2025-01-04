@@ -415,3 +415,4 @@ func (c *Client) DeleteSecret(secretPath string, key string) error {
 
 	return nil
 }
+
