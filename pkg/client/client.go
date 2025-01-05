@@ -379,24 +379,39 @@ func (c *Client) SetSecret(secretPath string, key string, value string) error {
 		return errors.NewError(errors.ErrCodeNetworkError, "client closed", nil)
 	}
 
-	// First ensure the folder exists
-	if secretPath != "/" {
-		if err := c.createFolder(secretPath); err != nil {
-			return err
-		}
-	}
-
-	// Try to create the secret first
-	_, err := c.client.Secrets().Create(infisical.CreateSecretOptions{
-		ProjectID:   c.config.ProjectId,
-		Environment: c.config.Environment,
+	// First try to retrieve the secret to check if it exists
+	_, err := c.client.Secrets().Retrieve(infisical.RetrieveSecretOptions{
 		SecretKey:   key,
-		SecretValue: value,
+		Environment: c.config.Environment,
+		ProjectID:   c.config.ProjectId,
 		SecretPath:  secretPath,
 	})
 
 	if err != nil {
-		// If creation fails, try to update in case the secret already exists
+		// Check if the error is an APIError and contains "Folder not found"
+		if apiErr, ok := err.(*infisical.APIError); ok && strings.Contains(apiErr.ErrorMessage, "Folder not found") {
+			// Only create folder if it's explicitly reported as not found
+			if secretPath != "/" {
+				if err := c.createFolder(secretPath); err != nil {
+					return err
+				}
+			}
+		}
+
+		// Try to create the secret since it doesn't exist
+		_, err = c.client.Secrets().Create(infisical.CreateSecretOptions{
+			ProjectID:   c.config.ProjectId,
+			Environment: c.config.Environment,
+			SecretKey:   key,
+			SecretValue: value,
+			SecretPath:  secretPath,
+		})
+
+		if err != nil {
+			return errors.NewError(errors.ErrCodeSecretUpdateFailed, fmt.Sprintf("failed to create secret: %s", key), err)
+		}
+	} else {
+		// Secret exists, update it
 		_, err = c.client.Secrets().Update(infisical.UpdateSecretOptions{
 			SecretKey:      key,
 			NewSecretValue: value,
@@ -406,7 +421,7 @@ func (c *Client) SetSecret(secretPath string, key string, value string) error {
 		})
 
 		if err != nil {
-			return errors.NewError(errors.ErrCodeSecretUpdateFailed, fmt.Sprintf("failed to set secret: %s", key), err)
+			return errors.NewError(errors.ErrCodeSecretUpdateFailed, fmt.Sprintf("failed to update secret: %s", key), err)
 		}
 	}
 
