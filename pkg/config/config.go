@@ -30,7 +30,7 @@ func DefaultConfig() Config {
 		SiteURL:         "https://app.infisical.com",
 		Environment:     "dev",
 		SecretPath:      "/",
-		RefreshInterval: 30 * time.Second,
+		RefreshInterval: 60 * time.Second,
 		MaxRetries:      3,
 		Debug:           false,
 	}
